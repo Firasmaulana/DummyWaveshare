@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ModbusMaster.h> // Tambahan Library Modbus
 #include <lvgl.h>
 
 /*To use the built-in examples and demos of LVGL uncomment the includes below respectively.
@@ -12,11 +13,25 @@
 #define DIRECT_RENDER_MODE // Uncomment to enable full frame buffer
 
 #include <Arduino_GFX_Library.h>
-
 #include "TCA9554.h"
-
 #include <Wire.h>
 #include "esp_lcd_touch_axs15231b.h"
+
+// --- Konfigurasi RS485 ---
+#define RS485_RX 43
+#define RS485_TX 44
+HardwareSerial RS485Serial(1); 
+ModbusMaster node;
+
+// --- Variabel Global Label LVGL ---
+lv_obj_t * label_gas;
+lv_obj_t * label_temp;
+lv_obj_t * label_hum;
+lv_obj_t * label_status;
+
+// --- Variabel Timing (Pengganti delay) ---
+unsigned long lastModbusRead = 0;
+const unsigned long modbusInterval = 2000;
 
 #define GFX_BL 6  // default backlight pin, you may replace DF_GFX_BL to actual backlight pin
 
@@ -35,7 +50,6 @@ TCA9554 TCA(0x20);
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(LCD_QSPI_CS, LCD_QSPI_CLK, LCD_QSPI_D0, LCD_QSPI_D1, LCD_QSPI_D2, LCD_QSPI_D3);
 
 Arduino_GFX *gfx = new Arduino_AXS15231B(bus, -1 /* RST */, 0 /* rotation */, false, 320, 480);
-
 
 uint32_t screenWidth;
 uint32_t screenHeight;
@@ -69,12 +83,8 @@ void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *c
 
 /*Read the touchpad*/
 void my_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
-
   touch_data_t touch_data;
   bsp_touch_read();
-
-  // int16_t x[1], y[1];
-  // uint8_t touched = touch.getPoint(x, y, 1);
 
   if (bsp_touch_get_coordinates(&touch_data)) {
     data->state = LV_INDEV_STATE_PR;
@@ -83,6 +93,43 @@ void my_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
     data->point.y = touch_data.coords[0].y;
   } else {
     data->state = LV_INDEV_STATE_REL;
+  }
+}
+
+// --- Fungsi Pembacaan Sensor RS485 & Update UI ---
+void read_rs485_data() {
+  uint8_t result;
+  
+  // Meminta 4 register dimulai dari alamat 0x0000
+  result = node.readHoldingRegisters(0x0000, 4);
+
+  if (result == node.ku8MBSuccess) {
+    uint16_t rawGas    = node.getResponseBuffer(0);
+    uint16_t rawTemp   = node.getResponseBuffer(1);
+    uint16_t rawHum    = node.getResponseBuffer(2);
+    uint16_t rawStatus = node.getResponseBuffer(3);
+    
+    float gasConcentration = rawGas / 10.0;
+    float temperature = rawTemp / 10.0;
+    float humidity = rawHum / 10.0;
+    
+    // Update teks pada label LVGL
+    lv_label_set_text_fmt(label_gas, "Gas: %.1f ppm", gasConcentration);
+    lv_label_set_text_fmt(label_temp, "Suhu: %.1f C", temperature);
+    lv_label_set_text_fmt(label_hum, "Kelembaban: %.1f %%", humidity);
+    
+    if(rawStatus == 0) {
+      lv_label_set_text(label_status, "Status: OK");
+      lv_obj_set_style_text_color(label_status, lv_color_hex(0x00FF00), 0); // Hijau
+    } else if(rawStatus == 1) {
+      lv_label_set_text(label_status, "Status: WARNING");
+      lv_obj_set_style_text_color(label_status, lv_color_hex(0xFFA500), 0); // Oranye
+    } else {
+      lv_label_set_text(label_status, "Status: ERROR");
+      lv_obj_set_style_text_color(label_status, lv_color_hex(0xFF0000), 0); // Merah
+    }
+  } else {
+    Serial.printf("Error Code Modbus: %02X\n", result);
   }
 }
 
@@ -102,11 +149,13 @@ void setup() {
   delay(200);
 
   Serial.begin(115200);
-  // Serial.setDebugOutput(true);
-  // while(!Serial);
   Serial.println("Arduino_GFX LVGL_Arduino_v8 example ");
   String LVGL_Arduino = String('V') + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
   Serial.println(LVGL_Arduino);
+
+  // Inisialisasi RS485
+  RS485Serial.begin(9600, SERIAL_8N1, RS485_RX, RS485_TX);
+  node.begin(1, RS485Serial);
 
   // Init Display
   if (!gfx->begin()) {
@@ -118,17 +167,6 @@ void setup() {
   pinMode(GFX_BL, OUTPUT);
   digitalWrite(GFX_BL, HIGH);
 #endif
-
-  // Init touch device
-
-  
-
-  // if (!touch.begin(Wire, FT6X36_SLAVE_ADDRESS)) {
-  //   Serial.println("Failed to find FT6X36 - check your wiring!");
-  //   while (1) {
-  //     delay(1000);
-  //   }
-  // }
 
   lv_init();
 
@@ -173,28 +211,22 @@ void setup() {
     indev_drv.read_cb = my_touchpad_read;
     lv_indev_drv_register(&indev_drv);
 
-    /* Option 1: Create simple label */
-    lv_obj_t *label = lv_label_create(lv_scr_act());
-    lv_label_set_text(label, "Hello Arduino! (V" GFX_STR(LVGL_VERSION_MAJOR) "." GFX_STR(LVGL_VERSION_MINOR) "." GFX_STR(LVGL_VERSION_PATCH) ")");
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+    /* --- Membuat UI Pembacaan Sensor --- */
+    label_gas = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_gas, "Gas: -- ppm");
+    lv_obj_align(label_gas, LV_ALIGN_CENTER, 0, -60);
 
-    lv_obj_t *sw = lv_switch_create(lv_scr_act());
-    lv_obj_align(sw, LV_ALIGN_TOP_MID, 0, 50);
+    label_temp = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_temp, "Suhu: -- C");
+    lv_obj_align(label_temp, LV_ALIGN_CENTER, 0, -20);
 
-    sw = lv_switch_create(lv_scr_act());
-    lv_obj_align(sw, LV_ALIGN_BOTTOM_MID, 0, -50);
+    label_hum = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_hum, "Kelembaban: -- %");
+    lv_obj_align(label_hum, LV_ALIGN_CENTER, 0, 20);
 
-    /* Option 2: Try an example. See all the examples
-     * online: https://docs.lvgl.io/master/examples.html
-     * source codes: https://github.com/lvgl/lvgl/tree/e7f88efa5853128bf871dde335c0ca8da9eb7731/examples */
-    // lv_example_btn_1();
-
-    /* Option 3: Or try out a demo. Don't forget to enable the demos in lv_conf.h. E.g. LV_USE_DEMOS_WIDGETS*/
-    // lv_demo_widgets();
-    // lv_demo_benchmark();
-    // lv_demo_keypad_encoder();
-    // lv_demo_music();
-    // lv_demo_stress();
+    label_status = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_status, "Status: --");
+    lv_obj_align(label_status, LV_ALIGN_CENTER, 0, 60);
   }
 
   Serial.println("Setup done");
@@ -203,13 +235,11 @@ void setup() {
 void loop() {
   lv_timer_handler(); /* let the GUI do its work */
 
-// #ifdef DIRECT_RENDER_MODE
-// #if (LV_COLOR_16_SWAP != 0)
-//   gfx->draw16bitBeRGBBitmap(0, 0, (uint16_t *)disp_draw_buf, screenWidth, screenHeight);
-// #else
-//   gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)disp_draw_buf, screenWidth, screenHeight);
-// #endif
-// #endif  // !DIRECT_RENDER_MODE
+  // Pembacaan Modbus RS485 setiap 2 detik tanpa mem-block LVGL
+  if (millis() - lastModbusRead >= modbusInterval) {
+    lastModbusRead = millis();
+    read_rs485_data();
+  }
 
   delay(5);
 }
