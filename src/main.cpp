@@ -6,9 +6,7 @@
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
 #include "TCA9554.h"
-// Catatan: Pastikan file 'esp_lcd_touch_axs15231b.h' dan .c dari example 
-// sudah Anda letakkan di dalam folder 'src' (atau include/lib).
-#include "esp_lcd_touch_axs15231b.h" 
+#include "esp_lcd_touch_axs15231b.h"
 
 // --- DEFINISI PIN LCD & I2C ---
 #define GFX_BL        6
@@ -22,8 +20,8 @@
 #define I2C_SCL       7
 
 // --- DEFINISI PIN MODBUS ---
-#define RS485_RX 16
-#define RS485_TX 17
+#define RS485_RX 43
+#define RS485_TX 44
 
 // --- INISIALISASI OBJEK HARDWARE ---
 TCA9554 TCA(0x20);
@@ -33,11 +31,10 @@ Arduino_GFX *gfx = new Arduino_AXS15231B(bus, -1 /* RST */, 0 /* rotation */, fa
 HardwareSerial RS485Serial(1); 
 ModbusMaster node;
 
-// --- VARIABEL LVGL & MODBUS ---
+// --- VARIABEL LVGL V8 & MODBUS ---
 uint32_t screenWidth;
 uint32_t screenHeight;
-uint32_t bufSize;
-lv_display_t *disp;
+lv_disp_draw_buf_t draw_buf; // V8 menggunakan ini
 lv_color_t *disp_draw_buf1;
 lv_color_t *disp_draw_buf2;
 
@@ -50,19 +47,17 @@ lv_obj_t * ui_LabelSuhu;
 lv_obj_t * ui_LabelKelembaban;
 lv_obj_t * ui_LabelStatus;
 
-// --- CALLBACK LVGL V9 ---
-uint32_t millis_cb(void) {
-  return millis();
+// --- CALLBACK LVGL V8 ---
+// Flush callback (Render layar)
+void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
+  uint32_t w = (area->x2 - area->x1 + 1);
+  uint32_t h = (area->y2 - area->y1 + 1);
+  gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
+  lv_disp_flush_ready(disp_drv);
 }
 
-void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
-  uint32_t w = lv_area_get_width(area);
-  uint32_t h = lv_area_get_height(area);
-  gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, w, h);
-  lv_disp_flush_ready(disp);
-}
-
-void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
+// Read callback (Touchscreen)
+void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
   touch_data_t touch_data;
   bsp_touch_read();
   if (bsp_touch_get_coordinates(&touch_data)) {
@@ -77,37 +72,29 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
 // --- FUNGSI PEMBUAT UI ---
 void build_ui() {
   lv_obj_t * scr = lv_scr_act();
-  
-  // Mengatur warna background layar menjadi gelap agar teks lebih jelas
   lv_obj_set_style_bg_color(scr, lv_color_hex(0x1A1A1A), LV_PART_MAIN);
 
-  // Membuat Panel / Kartu di tengah
   lv_obj_t * panel = lv_obj_create(scr);
   lv_obj_set_size(panel, 280, 300);
   lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
 
-  // Judul
   lv_obj_t * title = lv_label_create(panel);
   lv_label_set_text(title, "AQMS MONITORING");
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
   lv_obj_set_style_text_color(title, lv_color_hex(0x00A8FF), LV_PART_MAIN);
 
-  // Label Gas
   ui_LabelGas = lv_label_create(panel);
   lv_label_set_text(ui_LabelGas, "Gas : Menunggu...");
   lv_obj_align(ui_LabelGas, LV_ALIGN_TOP_LEFT, 20, 60);
 
-  // Label Suhu
   ui_LabelSuhu = lv_label_create(panel);
   lv_label_set_text(ui_LabelSuhu, "Suhu: Menunggu...");
   lv_obj_align(ui_LabelSuhu, LV_ALIGN_TOP_LEFT, 20, 100);
 
-  // Label Kelembaban
   ui_LabelKelembaban = lv_label_create(panel);
   lv_label_set_text(ui_LabelKelembaban, "RH  : Menunggu...");
   lv_obj_align(ui_LabelKelembaban, LV_ALIGN_TOP_LEFT, 20, 140);
 
-  // Label Status
   ui_LabelStatus = lv_label_create(panel);
   lv_label_set_text(ui_LabelStatus, "Stat: Menghubungkan...");
   lv_obj_align(ui_LabelStatus, LV_ALIGN_TOP_LEFT, 20, 180);
@@ -115,9 +102,7 @@ void build_ui() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Sistem Memulai...");
 
-  // 1. Inisialisasi Cip Ekspander (TCA9554) & I2C
   Wire.begin(I2C_SDA, I2C_SCL);
   TCA.begin();
   TCA.pinMode1(1, OUTPUT);
@@ -125,62 +110,63 @@ void setup() {
   TCA.write1(1, 0); delay(10);
   TCA.write1(1, 1); delay(200);
 
-  // 2. Inisialisasi Touchscreen
   bsp_touch_init(&Wire, -1, 0, 320, 480);
 
-  // 3. Inisialisasi Driver Grafis LCD
   if (!gfx->begin()) {
     Serial.println("gfx->begin() failed!");
   }
   gfx->fillScreen(RGB565_BLACK);
   
-  // 4. NYALAKAN BACKLIGHT
   pinMode(GFX_BL, OUTPUT);
   digitalWrite(GFX_BL, HIGH);
 
-  // 5. Inisialisasi LVGL v9
+  // --- INISIALISASI LVGL V8 ---
   lv_init();
-  lv_tick_set_cb(millis_cb);
 
   screenWidth = gfx->width();
   screenHeight = gfx->height();
   
-  // Alokasi memori buffer LVGL (menggunakan PSRAM jika tersedia)
-  bufSize = screenWidth * screenHeight;
-  disp_draw_buf1 = (lv_color_t *)heap_caps_malloc(bufSize * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  disp_draw_buf2 = (lv_color_t *)heap_caps_malloc(bufSize * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  // Alokasi Buffer untuk V8 (Lebih hemat memori)
+  uint32_t bufSize = screenWidth * 40; // Render 40 baris per frame
+  disp_draw_buf1 = (lv_color_t *)heap_caps_malloc(bufSize * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   
-  if (!disp_draw_buf1 || !disp_draw_buf2) {
+  if (!disp_draw_buf1) {
     Serial.println("Alokasi memori LVGL gagal!");
   } else {
-    disp = lv_display_create(screenWidth, screenHeight);
-    lv_display_set_flush_cb(disp, my_disp_flush);
-    lv_display_set_buffers(disp, disp_draw_buf1, disp_draw_buf2, bufSize * 2, LV_DISPLAY_RENDER_MODE_FULL);
+    // 1. Inisialisasi Draw Buffer
+    lv_disp_draw_buf_init(&draw_buf, disp_draw_buf1, NULL, bufSize);
 
-    lv_indev_t *indev = lv_indev_create();
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(indev, my_touchpad_read);
+    // 2. Inisialisasi Display Driver V8
+    static lv_disp_drv_t disp_drv;
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = screenWidth;
+    disp_drv.ver_res = screenHeight;
+    disp_drv.flush_cb = my_disp_flush;
+    disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
+
+    // 3. Inisialisasi Input Device V8
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = my_touchpad_read;
+    lv_indev_drv_register(&indev_drv);
   }
 
-  // 6. Buat Antarmuka Pengguna
   build_ui();
 
-  // 7. Inisialisasi Modbus RS485
   RS485Serial.begin(9600, SERIAL_8N1, RS485_RX, RS485_TX);
   node.begin(1, RS485Serial); 
 }
 
 void loop() {
-  // Tugas 1: Proses animasi dan layar sentuh
-  lv_task_handler(); 
+  lv_timer_handler(); // V8 menggunakan lv_timer_handler, BUKAN lv_task_handler
   delay(5); 
   
-  // Tugas 2: Proses data sensor secara berkala (Non-Blocking)
   unsigned long currentMillis = millis();
   if (currentMillis - lastModbusPoll >= POLLING_INTERVAL) {
     lastModbusPoll = currentMillis; 
     
-    // Minta 4 register ke ESP Dummy (Slave)
     uint8_t result = node.readHoldingRegisters(0x0000, 4);
 
     if (result == node.ku8MBSuccess) {
@@ -196,16 +182,16 @@ void loop() {
         
         if (rawStatus == 0) {
             lv_label_set_text(ui_LabelStatus, "Stat: OK (Online)");
-            lv_obj_set_style_text_color(ui_LabelStatus, lv_color_hex(0x00FF00), LV_PART_MAIN); // Hijau
+            lv_obj_set_style_text_color(ui_LabelStatus, lv_color_hex(0x00FF00), LV_PART_MAIN);
         } else {
             lv_label_set_text(ui_LabelStatus, "Stat: WARNING");
-            lv_obj_set_style_text_color(ui_LabelStatus, lv_color_hex(0xFFA500), LV_PART_MAIN); // Oranye
+            lv_obj_set_style_text_color(ui_LabelStatus, lv_color_hex(0xFFA500), LV_PART_MAIN);
         }
       }
     } else {
       if (ui_LabelStatus != NULL) {
          lv_label_set_text(ui_LabelStatus, "Stat: DISCONNECTED");
-         lv_obj_set_style_text_color(ui_LabelStatus, lv_color_hex(0xFF0000), LV_PART_MAIN); // Merah
+         lv_obj_set_style_text_color(ui_LabelStatus, lv_color_hex(0xFF0000), LV_PART_MAIN);
       }
     }
   }
