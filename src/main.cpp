@@ -1,3 +1,4 @@
+
 #include <Arduino.h>
 #include <ModbusMaster.h> // Tambahan Library Modbus
 #include <lvgl.h>
@@ -104,20 +105,19 @@ void read_rs485_data() {
   result = node.readHoldingRegisters(0x0000, 4);
 
   if (result == node.ku8MBSuccess) {
+    // Ambil data raw (integer) langsung dari Modbus
     uint16_t rawGas    = node.getResponseBuffer(0);
     uint16_t rawTemp   = node.getResponseBuffer(1);
     uint16_t rawHum    = node.getResponseBuffer(2);
     uint16_t rawStatus = node.getResponseBuffer(3);
     
-    float gasConcentration = rawGas / 10.0;
-    float temperature = rawTemp / 10.0;
-    float humidity = rawHum / 10.0;
+    // PERBAIKAN: Hindari penggunaan float dan '%f'. 
+// Gunakan %u karena rawGas, rawTemp, rawHum adalah unsigned 16-bit
+    lv_label_set_text_fmt(label_gas, "Gas: %u.%u ppm", (rawGas / 10), (rawGas % 10));
+    lv_label_set_text_fmt(label_temp, "Suhu: %u.%u C", (rawTemp / 10), (rawTemp % 10));
+    lv_label_set_text_fmt(label_hum, "Kelembaban: %u.%u %%", (rawHum / 10), (rawHum % 10));
     
-    // Update teks pada label LVGL
-    lv_label_set_text_fmt(label_gas, "Gas: %.1f ppm", gasConcentration);
-    lv_label_set_text_fmt(label_temp, "Suhu: %.1f C", temperature);
-    lv_label_set_text_fmt(label_hum, "Kelembaban: %.1f %%", humidity);
-    
+    // Status Logic
     if(rawStatus == 0) {
       lv_label_set_text(label_status, "Status: OK");
       lv_obj_set_style_text_color(label_status, lv_color_hex(0x00FF00), 0); // Hijau
@@ -128,11 +128,12 @@ void read_rs485_data() {
       lv_label_set_text(label_status, "Status: ERROR");
       lv_obj_set_style_text_color(label_status, lv_color_hex(0xFF0000), 0); // Merah
     }
+    
+    Serial.println("Data GUI Berhasil Diperbarui!");
   } else {
     Serial.printf("Error Code Modbus: %02X\n", result);
   }
 }
-
 void setup() {
 #ifdef DEV_DEVICE_INIT
   DEV_DEVICE_INIT();
@@ -211,21 +212,27 @@ void setup() {
     indev_drv.read_cb = my_touchpad_read;
     lv_indev_drv_register(&indev_drv);
 
-    /* --- Membuat UI Pembacaan Sensor --- */
+/* --- Membuat UI Pembacaan Sensor --- */
     label_gas = lv_label_create(lv_scr_act());
     lv_label_set_text(label_gas, "Gas: -- ppm");
+    lv_obj_set_style_text_color(label_gas, lv_color_hex(0x000000), 0); // Set ke putih
     lv_obj_align(label_gas, LV_ALIGN_CENTER, 0, -60);
 
     label_temp = lv_label_create(lv_scr_act());
     lv_label_set_text(label_temp, "Suhu: -- C");
+    lv_obj_set_style_text_color(label_temp, lv_color_hex(0x000000), 0); // Set ke putih
     lv_obj_align(label_temp, LV_ALIGN_CENTER, 0, -20);
 
     label_hum = lv_label_create(lv_scr_act());
     lv_label_set_text(label_hum, "Kelembaban: -- %");
+    lv_obj_set_style_text_color(label_hum, lv_color_hex(0x000000), 0); // Set ke putih
     lv_obj_align(label_hum, LV_ALIGN_CENTER, 0, 20);
 
     label_status = lv_label_create(lv_scr_act());
     lv_label_set_text(label_status, "Status: --");
+    // Status tidak perlu diset putih di sini jika Anda ingin defaultnya putih, 
+    // tapi lebih aman diset juga agar konsisten sebelum Modbus terbaca.
+    lv_obj_set_style_text_color(label_status, lv_color_hex(0x000000), 0); 
     lv_obj_align(label_status, LV_ALIGN_CENTER, 0, 60);
   }
 
